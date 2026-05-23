@@ -17,6 +17,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -30,6 +31,7 @@ public class EventService {
 
     private final EventRepository eventRepository;
     private final EventMapper eventMapper;
+    private final TransactionTemplate transactionTemplate;
 
     /**
      * Per-eventId lock registry for application-level concurrency control.
@@ -41,16 +43,21 @@ public class EventService {
      * Creates a new event or returns the existing one (idempotent).
      *
      * Two-layer concurrency protection:
-     *   Layer 1 — ReentrantLock per eventId prevents redundant DB round-trips
-     *             when two threads arrive at the same time for the same id.
-     *   Layer 2 — DB primary key + DataIntegrityViolationException catch acts as
-     *             the ultimate fallback for any race that slips past Layer 1.
+     *   Layer 1 — ReentrantLock per eventId serialises concurrent threads for the
+     *             same eventId at the application level.
+     *   Layer 2 — DB primary key + DataIntegrityViolationException catch is the
+     *             ultimate fallback for any race that slips past Layer 1.
+     *
+     * TransactionTemplate is used (not @Transactional) so that the DB commit
+     * happens INSIDE the lock boundary. With @Transactional the proxy commits
+     * AFTER the method returns — after the lock is already released — which would
+     * let a second thread read uncommitted data and fail with a 500.
      */
-    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.SERIALIZABLE)
     public CreateEventResult createEvent(EventRequest request) {
         ReentrantLock lock = acquireLock(request.getEventId());
         try {
-            return eventRepository.findById(request.getEventId())
+            return transactionTemplate.execute(status ->
+                eventRepository.findById(request.getEventId())
                     .map(existing -> new CreateEventResult(eventMapper.toResponse(existing), false))
                     .orElseGet(() -> {
                         try {
@@ -62,7 +69,8 @@ public class EventService {
                                     .orElseThrow(() -> ex);
                             return new CreateEventResult(eventMapper.toResponse(existing), false);
                         }
-                    });
+                    })
+            );
         } finally {
             releaseLock(request.getEventId(), lock);
         }
