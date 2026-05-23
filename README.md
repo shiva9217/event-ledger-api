@@ -35,7 +35,7 @@ Server starts on **http://localhost:8080**
 mvn test
 ```
 
-All 17 integration tests must pass.
+All 19 integration tests must pass.
 
 ---
 
