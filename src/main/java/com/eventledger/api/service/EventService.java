@@ -11,6 +11,7 @@ import com.eventledger.api.exception.EventNotFoundException;
 import com.eventledger.api.exception.InvalidPageParamsException;
 import com.eventledger.api.repository.EventRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class EventService {
@@ -54,17 +56,27 @@ public class EventService {
      * let a second thread read uncommitted data and fail with a 500.
      */
     public CreateEventResult createEvent(EventRequest request) {
+        log.debug("createEvent called: eventId={}, accountId={}, type={}, amount={}",
+                request.getEventId(), request.getAccountId(), request.getType(), request.getAmount());
+
         ReentrantLock lock = acquireLock(request.getEventId());
         try {
             return transactionTemplate.execute(status ->
                 eventRepository.findById(request.getEventId())
-                    .map(existing -> new CreateEventResult(eventMapper.toResponse(existing), false))
+                    .map(existing -> {
+                        log.info("Duplicate event received — returning original: eventId={}", existing.getEventId());
+                        return new CreateEventResult(eventMapper.toResponse(existing), false);
+                    })
                     .orElseGet(() -> {
                         try {
                             Event saved = eventRepository.saveAndFlush(eventMapper.toEntity(request));
+                            log.info("Event created: eventId={}, accountId={}, type={}, amount={}",
+                                    saved.getEventId(), saved.getAccountId(), saved.getType(), saved.getAmount());
                             return new CreateEventResult(eventMapper.toResponse(saved), true);
                         } catch (DataIntegrityViolationException ex) {
                             // DB-level fallback: another thread won the INSERT race.
+                            log.warn("DataIntegrityViolationException — concurrent duplicate detected for eventId={}; fetching original",
+                                    request.getEventId());
                             Event existing = eventRepository.findById(request.getEventId())
                                     .orElseThrow(() -> ex);
                             return new CreateEventResult(eventMapper.toResponse(existing), false);
@@ -78,8 +90,12 @@ public class EventService {
 
     @Transactional(readOnly = true)
     public EventResponse getEvent(String eventId) {
+        log.debug("getEvent: eventId={}", eventId);
         Event event = eventRepository.findById(eventId)
-                .orElseThrow(() -> new EventNotFoundException(eventId));
+                .orElseThrow(() -> {
+                    log.warn("Event not found: eventId={}", eventId);
+                    return new EventNotFoundException(eventId);
+                });
         return eventMapper.toResponse(event);
     }
 
@@ -98,10 +114,13 @@ public class EventService {
      */
     @Transactional(readOnly = true)
     public PagedResponse<EventResponse> getEventsByAccountPaged(String accountId, int page, int size) {
+        log.debug("getEventsByAccountPaged: accountId={}, page={}, size={}", accountId, page, size);
         validatePageParams(page, size);
 
         PageRequest pageable = PageRequest.of(page, size, Sort.by("eventTimestamp").ascending());
         Page<Event> result = eventRepository.findByAccountIdOrderByEventTimestampAsc(accountId, pageable);
+        log.debug("getEventsByAccountPaged result: accountId={}, totalElements={}, totalPages={}",
+                accountId, result.getTotalElements(), result.getTotalPages());
 
         List<EventResponse> content = result.getContent()
                 .stream()
@@ -124,21 +143,25 @@ public class EventService {
     private ReentrantLock acquireLock(String eventId) {
         ReentrantLock lock = lockRegistry.computeIfAbsent(eventId, k -> new ReentrantLock());
         lock.lock();
+        log.debug("Lock acquired: eventId={}", eventId);
         return lock;
     }
 
     private void releaseLock(String eventId, ReentrantLock lock) {
         lock.unlock();
         lockRegistry.remove(eventId);
+        log.debug("Lock released: eventId={}", eventId);
     }
 
     // ── pagination helpers ─────────────────────────────────────────────────────
 
     private void validatePageParams(int page, int size) {
         if (page < 0) {
+            log.warn("Invalid page param: page={}", page);
             throw new InvalidPageParamsException("page must be >= 0");
         }
         if (size < 1 || size > 100) {
+            log.warn("Invalid size param: size={}", size);
             throw new InvalidPageParamsException("size must be between 1 and 100");
         }
     }
@@ -150,6 +173,7 @@ public class EventService {
      */
     @Transactional(readOnly = true)
     public BalanceResponse getBalance(String accountId) {
+        log.debug("getBalance: accountId={}", accountId);
         BigDecimal credits = eventRepository.sumAmountByAccountIdAndType(accountId, EventType.CREDIT);
         BigDecimal debits  = eventRepository.sumAmountByAccountIdAndType(accountId, EventType.DEBIT);
         long count         = eventRepository.countByAccountId(accountId);
@@ -158,9 +182,13 @@ public class EventService {
                 accountId, PageRequest.of(0, 1));
         String currency = currencies.isEmpty() ? "USD" : currencies.get(0);
 
+        BigDecimal balance = credits.subtract(debits).setScale(2, RoundingMode.HALF_UP);
+        log.info("Balance computed: accountId={}, balance={}, currency={}, eventCount={}",
+                accountId, balance, currency, count);
+
         return BalanceResponse.builder()
                 .accountId(accountId)
-                .balance(credits.subtract(debits).setScale(2, RoundingMode.HALF_UP))
+                .balance(balance)
                 .currency(currency)
                 .eventCount(count)
                 .build();
