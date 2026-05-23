@@ -1,6 +1,6 @@
 # Event Ledger API
 
-A production-quality Spring Boot REST API for ingesting and querying financial ledger events with idempotent POST semantics and chronological balance computation.
+A production-quality Spring Boot REST API for ingesting and querying financial ledger events with idempotent POST semantics, paginated queries, thread-safe concurrency handling, and chronological balance computation.
 
 ---
 
@@ -8,24 +8,48 @@ A production-quality Spring Boot REST API for ingesting and querying financial l
 
 - Java 17+
 - Maven 3.8+
+- Docker & Docker Compose (optional — for containerised run)
 
 ---
 
-## Build
+## Branch Structure
+
+```
+main
+ └── develop-v2
+      ├── feature/pagination
+      ├── feature/swagger-openapi
+      ├── feature/concurrency-handling
+      └── feature/docker-setup
+```
+
+Flow: `feature/*` → `develop-v2` → `main`
+
+---
+
+## Running Options
+
+### Option 1 — Local (Maven)
 
 ```bash
 mvn clean install
-```
-
----
-
-## Run
-
-```bash
 mvn spring-boot:run
 ```
 
 Server starts on **http://localhost:8080**
+
+### Option 2 — Docker Compose
+
+```bash
+docker compose up --build
+```
+
+Server starts on **http://localhost:8080**  
+Health status visible in Docker Desktop or via:
+
+```bash
+docker inspect event-ledger-api --format='{{.State.Health.Status}}'
+```
 
 ---
 
@@ -35,31 +59,27 @@ Server starts on **http://localhost:8080**
 mvn test
 ```
 
-All 19 integration tests must pass.
+All 31 integration tests must pass.
 
 ---
 
-## H2 Console
+## API Endpoints
 
-Available at **http://localhost:8080/h2-console** while the app is running.
-
-| Setting | Value |
-|---|---|
-| JDBC URL | `jdbc:h2:mem:ledgerdb` |
-| Username | `sa` |
-| Password | _(blank)_ |
-
----
-
-## Swagger UI
-
-Available at **http://localhost:8080/swagger-ui.html**
+| Method | Endpoint | Description |
+|--------|---|---|
+| `POST` | `/events` | Submit event (idempotent) |
+| `GET` | `/events/{id}` | Get event by ID |
+| `GET` | `/events?account={id}&page=0&size=20` | List events paginated, ordered by eventTimestamp ASC |
+| `GET` | `/accounts/{accountId}/balance` | Get net balance (CREDIT − DEBIT) |
+| `GET` | `/swagger-ui.html` | Swagger UI |
+| `GET` | `/api-docs` | OpenAPI JSON |
+| `GET` | `/actuator/health` | Health check (used by Docker healthcheck) |
 
 ---
 
-## API Endpoints & curl Examples
+## curl Examples
 
-### POST /events — Ingest a new event (idempotent)
+### POST /events — Submit a new event (idempotent)
 
 ```bash
 curl -s -X POST http://localhost:8080/events \
@@ -77,8 +97,6 @@ curl -s -X POST http://localhost:8080/events \
 
 **201 Created** (new event) or **200 OK** (duplicate — returns original, no side-effects).
 
----
-
 ### GET /events/{id} — Fetch a single event
 
 ```bash
@@ -87,25 +105,33 @@ curl -s http://localhost:8080/events/evt-001
 
 **200 OK** or **404 Not Found**.
 
----
-
-### GET /events?account={accountId} — List events for an account
-
-Returns events ordered by `eventTimestamp` ASC regardless of arrival order.
+### GET /events?account= — List events (paginated)
 
 ```bash
-curl -s "http://localhost:8080/events?account=acct-123"
+curl -s "http://localhost:8080/events?account=acct-123&page=0&size=20"
 ```
 
----
+Returns a pagination envelope:
+
+```json
+{
+  "content": [ ...events... ],
+  "page": 0,
+  "size": 20,
+  "totalElements": 53,
+  "totalPages": 3,
+  "first": true,
+  "last": false
+}
+```
+
+Events are always ordered by `eventTimestamp` ASC regardless of arrival order.
 
 ### GET /accounts/{accountId}/balance — Compute net balance
 
 ```bash
 curl -s http://localhost:8080/accounts/acct-123/balance
 ```
-
-Response:
 
 ```json
 {
@@ -116,7 +142,18 @@ Response:
 }
 ```
 
-Balance = SUM(CREDIT) − SUM(DEBIT). Returns `0.00` if no events exist for the account.
+Balance = SUM(CREDIT) − SUM(DEBIT). Returns `0.00` if no events exist.
+
+---
+
+## Concurrency
+
+Two-layer idempotency protection for simultaneous `POST /events` with the same `eventId`:
+
+| Layer | Mechanism | Purpose |
+|-------|---|---|
+| 1 | `ReentrantLock` per `eventId` in a `ConcurrentHashMap` | Serialises concurrent threads at application level; DB commit occurs **inside** the lock via `TransactionTemplate` |
+| 2 | DB primary key (`eventId = @Id`) + catch `DataIntegrityViolationException` | Ultimate safety net — handles any race that slips past Layer 1 |
 
 ---
 
@@ -134,29 +171,28 @@ All errors return a consistent JSON body:
 
 | `error` code | HTTP status | When |
 |---|---|---|
-| `VALIDATION_ERROR` | 400 | Missing/invalid field, bad type, zero/negative amount |
+| `VALIDATION_ERROR` | 400 | Missing/invalid field, bad type, zero/negative amount, invalid page params |
 | `NOT_FOUND` | 404 | Event does not exist |
 | `INTERNAL_ERROR` | 500 | Unexpected server fault |
 
 ---
 
-## Branch Structure
+## H2 Console
 
-```
-main
- └── develop
-      ├── feature/initial-setup
-      ├── feature/event-entity-repository
-      ├── feature/request-validation-dtos
-      ├── feature/post-events-idempotency
-      ├── feature/get-events-endpoints
-      ├── feature/balance-endpoint
-      ├── feature/exception-handler
-      ├── feature/integration-tests
-      └── feature/readme
-```
+Available at **http://localhost:8080/h2-console** while the app is running.
 
-Flow: `feature/*` → `develop` → `main`
+| Setting | Value |
+|---|---|
+| JDBC URL | `jdbc:h2:mem:ledgerdb` |
+| Username | `sa` |
+| Password | _(blank)_ |
+
+---
+
+## Swagger UI
+
+Available at **http://localhost:8080/swagger-ui.html**  
+OpenAPI JSON at **http://localhost:8080/api-docs**
 
 ---
 
@@ -167,8 +203,8 @@ Flow: `feature/*` → `develop` → `main`
 | `eventId` | String (PK) | Natural key from upstream; unique constraint enforces idempotency |
 | `accountId` | String (indexed) | Owning account |
 | `type` | Enum | `CREDIT` or `DEBIT` |
-| `amount` | BigDecimal | Must be > 0 |
+| `amount` | BigDecimal | Must be > 0; stored at 4dp, returned at 2dp |
 | `currency` | String | e.g. `USD` |
 | `eventTimestamp` | Instant | When the event **occurred** |
 | `receivedAt` | Instant | When the API **received** it |
-| `metadata` | String | Optional JSON string |
+| `metadata` | String (JSON) | Optional — accepts any JSON value (object, array, string, number, null) |
