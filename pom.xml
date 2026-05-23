@@ -62,6 +62,12 @@
             <version>2.5.0</version>
         </dependency>
 
+        <!-- Actuator — health/info endpoints for Docker healthcheck -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
