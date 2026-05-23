@@ -111,6 +111,21 @@ public class EventService {
                 .build();
     }
 
+    // ── concurrency helpers ────────────────────────────────────────────────────
+
+    private ReentrantLock acquireLock(String eventId) {
+        ReentrantLock lock = lockRegistry.computeIfAbsent(eventId, k -> new ReentrantLock());
+        lock.lock();
+        return lock;
+    }
+
+    private void releaseLock(String eventId, ReentrantLock lock) {
+        lock.unlock();
+        lockRegistry.remove(eventId);
+    }
+
+    // ── pagination helpers ─────────────────────────────────────────────────────
+
     private void validatePageParams(int page, int size) {
         if (page < 0) {
             throw new InvalidPageParamsException("page must be >= 0");
