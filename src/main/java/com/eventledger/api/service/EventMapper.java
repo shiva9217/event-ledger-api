@@ -8,6 +8,8 @@ import com.eventledger.api.exception.InvalidEventTypeException;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 
 @Component
@@ -32,12 +34,16 @@ public class EventMapper {
                 .eventId(event.getEventId())
                 .accountId(event.getAccountId())
                 .type(event.getType().name())
-                .amount(event.getAmount())
+                .amount(scale2(event.getAmount()))
                 .currency(event.getCurrency())
                 .eventTimestamp(event.getEventTimestamp())
                 .receivedAt(event.getReceivedAt())
                 .metadata(event.getMetadata())
                 .build();
+    }
+
+    static BigDecimal scale2(BigDecimal value) {
+        return value == null ? null : value.setScale(2, RoundingMode.HALF_UP);
     }
 
     private EventType parseType(String type) {

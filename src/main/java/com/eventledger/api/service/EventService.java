@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.List;
 
 @Service
@@ -81,7 +82,7 @@ public class EventService {
 
         return BalanceResponse.builder()
                 .accountId(accountId)
-                .balance(credits.subtract(debits))
+                .balance(credits.subtract(debits).setScale(2, RoundingMode.HALF_UP))
                 .currency(currency)
                 .eventCount(count)
                 .build();
