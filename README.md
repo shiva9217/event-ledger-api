@@ -35,7 +35,7 @@ Server starts on **http://localhost:8080**
 mvn test
 ```
 
-All 13 integration tests must pass.
+All 17 integration tests must pass.
 
 ---
 
@@ -71,7 +71,7 @@ curl -s -X POST http://localhost:8080/events \
     "amount": 150.00,
     "currency": "USD",
     "eventTimestamp": "2026-05-15T14:02:11Z",
-    "metadata": "{\"source\":\"mainframe-batch\",\"batchId\":\"B-9042\"}"
+    "metadata": { "source": "mainframe-batch", "batchId": "B-9042" }
   }'
 ```
 

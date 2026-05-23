@@ -1,6 +1,6 @@
 package com.eventledger.api.dto;
 
-import com.fasterxml.jackson.annotation.JsonRawValue;
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -37,5 +37,6 @@ public class EventRequest {
     @NotNull(message = "eventTimestamp is required")
     private Instant eventTimestamp;
 
-    private String metadata;
+    /** Optional — accepted as any JSON value (object, array, string, number, null). */
+    private JsonNode metadata;
 }

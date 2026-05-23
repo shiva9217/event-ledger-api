@@ -5,6 +5,7 @@ import com.eventledger.api.domain.EventType;
 import com.eventledger.api.dto.EventRequest;
 import com.eventledger.api.dto.EventResponse;
 import com.eventledger.api.exception.InvalidEventTypeException;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -22,7 +23,7 @@ public class EventMapper {
                 .currency(request.getCurrency())
                 .eventTimestamp(request.getEventTimestamp())
                 .receivedAt(Instant.now())
-                .metadata(request.getMetadata())
+                .metadata(toJsonString(request.getMetadata()))
                 .build();
     }
 
@@ -45,5 +46,11 @@ public class EventMapper {
         } catch (IllegalArgumentException | NullPointerException e) {
             throw new InvalidEventTypeException(type);
         }
+    }
+
+    /** Serialises a JsonNode to its compact JSON text for DB storage, or null if absent. */
+    private String toJsonString(JsonNode node) {
+        if (node == null || node.isNull()) return null;
+        return node.toString();
     }
 }

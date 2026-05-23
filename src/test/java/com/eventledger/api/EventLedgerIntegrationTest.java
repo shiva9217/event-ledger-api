@@ -431,4 +431,47 @@ class EventLedgerIntegrationTest {
                 .as("only one row must exist after duplicate submission")
                 .isEqualTo(1);
     }
+
+    // ─── 18. POST with metadata as JSON object → stored and returned correctly ─
+
+    @Test
+    void postEventWithJsonObjectMetadata_roundTripsCorrectly() throws Exception {
+        mockMvc.perform(post("/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "eventId": "evt-meta",
+                                  "accountId": "acct-001",
+                                  "type": "CREDIT",
+                                  "amount": 100.00,
+                                  "currency": "USD",
+                                  "eventTimestamp": "2026-05-15T10:00:00Z",
+                                  "metadata": { "source": "mainframe-batch", "batchId": "B-9042" }
+                                }
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.metadata.source").value("mainframe-batch"))
+                .andExpect(jsonPath("$.metadata.batchId").value("B-9042"));
+    }
+
+    // ─── 19. POST without metadata → accepted, metadata is null in response ───
+
+    @Test
+    void postEventWithoutMetadata_isAccepted() throws Exception {
+        mockMvc.perform(post("/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "eventId": "evt-no-meta",
+                                  "accountId": "acct-001",
+                                  "type": "DEBIT",
+                                  "amount": 25.00,
+                                  "currency": "USD",
+                                  "eventTimestamp": "2026-05-15T10:00:00Z"
+                                }
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.eventId").value("evt-no-meta"))
+                .andExpect(jsonPath("$.metadata").doesNotExist());
+    }
 }
