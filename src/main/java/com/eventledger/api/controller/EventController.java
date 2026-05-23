@@ -4,6 +4,7 @@ import com.eventledger.api.dto.CreateEventResult;
 import com.eventledger.api.dto.ErrorResponse;
 import com.eventledger.api.dto.EventRequest;
 import com.eventledger.api.dto.EventResponse;
+import com.eventledger.api.dto.PagedResponse;
 import com.eventledger.api.service.EventService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
