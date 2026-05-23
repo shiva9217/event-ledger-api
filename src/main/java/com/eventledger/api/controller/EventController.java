@@ -21,7 +21,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 
 @Tag(name = "Events", description = "Create and query financial ledger events")
 @RestController
@@ -182,39 +181,65 @@ public class EventController {
     }
 
     @Operation(
-        summary = "List events for an account",
-        description = "Returns all events for the given account ordered by `eventTimestamp` ascending (chronological order, regardless of arrival order)."
+        summary = "List events for an account (paginated)",
+        description = """
+            Returns events for the given account ordered by `eventTimestamp` ASC (chronological), \
+            regardless of arrival order.
+
+            Pagination is always by `eventTimestamp` ASC and is not configurable.
+            Defaults: page=0, size=20. Maximum size is 100.
+            """
     )
     @ApiResponses({
         @ApiResponse(
             responseCode = "200",
-            description = "Event list (may be empty)",
+            description = "Paginated event list",
             content = @Content(
                 mediaType = MediaType.APPLICATION_JSON_VALUE,
-                schema = @Schema(implementation = EventResponse.class),
+                schema = @Schema(implementation = PagedResponse.class),
                 examples = @ExampleObject(value = """
-                    [
-                      {
-                        "eventId": "evt-001",
-                        "accountId": "acct-123",
-                        "type": "CREDIT",
-                        "amount": 500.00,
-                        "currency": "USD",
-                        "eventTimestamp": "2026-05-10T08:00:00Z",
-                        "receivedAt": "2026-05-10T08:01:00Z",
-                        "metadata": null
-                      },
-                      {
-                        "eventId": "evt-002",
-                        "accountId": "acct-123",
-                        "type": "DEBIT",
-                        "amount": 200.00,
-                        "currency": "USD",
-                        "eventTimestamp": "2026-05-12T09:30:00Z",
-                        "receivedAt": "2026-05-12T09:31:00Z",
-                        "metadata": {"ref": "INV-7291"}
-                      }
-                    ]""")
+                    {
+                      "content": [
+                        {
+                          "eventId": "evt-001",
+                          "accountId": "acct-123",
+                          "type": "CREDIT",
+                          "amount": 500.00,
+                          "currency": "USD",
+                          "eventTimestamp": "2026-05-10T08:00:00Z",
+                          "receivedAt": "2026-05-10T08:01:00Z",
+                          "metadata": null
+                        }
+                      ],
+                      "page": 0,
+                      "size": 20,
+                      "totalElements": 1,
+                      "totalPages": 1,
+                      "first": true,
+                      "last": true
+                    }""")
+            )
+        ),
+        @ApiResponse(
+            responseCode = "400",
+            description = "Invalid page or size parameter",
+            content = @Content(
+                mediaType = MediaType.APPLICATION_JSON_VALUE,
+                schema = @Schema(implementation = ErrorResponse.class),
+                examples = {
+                    @ExampleObject(name = "size too large", value = """
+                        {
+                          "error": "VALIDATION_ERROR",
+                          "message": "size must be between 1 and 100",
+                          "timestamp": "2026-05-15T14:05:00Z"
+                        }"""),
+                    @ExampleObject(name = "negative page", value = """
+                        {
+                          "error": "VALIDATION_ERROR",
+                          "message": "page must be >= 0",
+                          "timestamp": "2026-05-15T14:05:00Z"
+                        }""")
+                }
             )
         ),
         @ApiResponse(
@@ -233,9 +258,13 @@ public class EventController {
         )
     })
     @GetMapping
-    public ResponseEntity<List<EventResponse>> getEventsByAccount(
+    public ResponseEntity<PagedResponse<EventResponse>> getEventsByAccount(
             @Parameter(description = "Account identifier to filter events", example = "acct-123", required = true)
-            @RequestParam("account") String accountId) {
-        return ResponseEntity.ok(eventService.getEventsByAccount(accountId));
+            @RequestParam("account") String accountId,
+            @Parameter(description = "Zero-based page number (default 0)", example = "0")
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @Parameter(description = "Page size — max 100 (default 20)", example = "20")
+            @RequestParam(value = "size", defaultValue = "20") int size) {
+        return ResponseEntity.ok(eventService.getEventsByAccountPaged(accountId, page, size));
     }
 }
