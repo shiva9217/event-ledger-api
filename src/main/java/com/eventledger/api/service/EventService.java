@@ -40,26 +40,32 @@ public class EventService {
     /**
      * Creates a new event or returns the existing one (idempotent).
      *
-     * The DB primary key on eventId is the ultimate uniqueness guard.
-     * saveAndFlush flushes within the transaction so concurrent duplicates
-     * surface as DataIntegrityViolationException here, not as an unhandled 500.
+     * Two-layer concurrency protection:
+     *   Layer 1 — ReentrantLock per eventId prevents redundant DB round-trips
+     *             when two threads arrive at the same time for the same id.
+     *   Layer 2 — DB primary key + DataIntegrityViolationException catch acts as
+     *             the ultimate fallback for any race that slips past Layer 1.
      */
-    @Transactional
+    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.SERIALIZABLE)
     public CreateEventResult createEvent(EventRequest request) {
-        return eventRepository.findById(request.getEventId())
-                .map(existing -> new CreateEventResult(eventMapper.toResponse(existing), false))
-                .orElseGet(() -> {
-                    try {
-                        Event saved = eventRepository.saveAndFlush(eventMapper.toEntity(request));
-                        return new CreateEventResult(eventMapper.toResponse(saved), true);
-                    } catch (DataIntegrityViolationException ex) {
-                        // Concurrent duplicate: another request won the INSERT race.
-                        // Fetch and return the persisted winner as an idempotent 200.
-                        Event existing = eventRepository.findById(request.getEventId())
-                                .orElseThrow(() -> ex);
-                        return new CreateEventResult(eventMapper.toResponse(existing), false);
-                    }
-                });
+        ReentrantLock lock = acquireLock(request.getEventId());
+        try {
+            return eventRepository.findById(request.getEventId())
+                    .map(existing -> new CreateEventResult(eventMapper.toResponse(existing), false))
+                    .orElseGet(() -> {
+                        try {
+                            Event saved = eventRepository.saveAndFlush(eventMapper.toEntity(request));
+                            return new CreateEventResult(eventMapper.toResponse(saved), true);
+                        } catch (DataIntegrityViolationException ex) {
+                            // DB-level fallback: another thread won the INSERT race.
+                            Event existing = eventRepository.findById(request.getEventId())
+                                    .orElseThrow(() -> ex);
+                            return new CreateEventResult(eventMapper.toResponse(existing), false);
+                        }
+                    });
+        } finally {
+            releaseLock(request.getEventId(), lock);
+        }
     }
 
     @Transactional(readOnly = true)
