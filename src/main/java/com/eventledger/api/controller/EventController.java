@@ -1,8 +1,8 @@
 package com.eventledger.api.controller;
 
+import com.eventledger.api.dto.CreateEventResult;
 import com.eventledger.api.dto.EventRequest;
 import com.eventledger.api.dto.EventResponse;
-import com.eventledger.api.repository.EventRepository;
 import com.eventledger.api.service.EventService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -18,14 +18,12 @@ import java.util.List;
 public class EventController {
 
     private final EventService eventService;
-    private final EventRepository eventRepository;
 
     @PostMapping
     public ResponseEntity<EventResponse> createEvent(@Valid @RequestBody EventRequest request) {
-        boolean alreadyExists = eventRepository.existsById(request.getEventId());
-        EventResponse response = eventService.createEvent(request);
-        HttpStatus status = alreadyExists ? HttpStatus.OK : HttpStatus.CREATED;
-        return ResponseEntity.status(status).body(response);
+        CreateEventResult result = eventService.createEvent(request);
+        HttpStatus status = result.isNew() ? HttpStatus.CREATED : HttpStatus.OK;
+        return ResponseEntity.status(status).body(result.event());
     }
 
     @GetMapping("/{id}")
