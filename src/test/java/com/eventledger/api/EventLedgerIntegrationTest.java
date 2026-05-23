@@ -14,6 +14,13 @@ import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
 @SpringBootTest
 @AutoConfigureMockMvc
 class EventLedgerIntegrationTest {
@@ -455,6 +462,110 @@ class EventLedgerIntegrationTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.metadata.source").value("mainframe-batch"))
                 .andExpect(jsonPath("$.metadata.batchId").value("B-9042"));
+    }
+
+    // ─── Concurrency tests ────────────────────────────────────────────────────
+
+    private static final String CONCURRENT_BODY = """
+            {"eventId":"concurrent-evt","accountId":"acct-concurrent",
+             "type":"CREDIT","amount":100.00,"currency":"USD",
+             "eventTimestamp":"2026-05-15T10:00:00Z"}""";
+
+    @Test
+    void concurrency_10SimultaneousPostsSameEventId_storesExactlyOne() throws Exception {
+        int threads = 10;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Callable<Integer>> tasks = new ArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            tasks.add(() -> mockMvc.perform(post("/events")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(CONCURRENT_BODY))
+                    .andReturn().getResponse().getStatus());
+        }
+
+        pool.invokeAll(tasks);
+        pool.shutdown();
+
+        assertThat(eventRepository.count())
+                .as("only one row must exist after 10 concurrent submissions of the same eventId")
+                .isEqualTo(1);
+    }
+
+    @Test
+    void concurrency_allResponsesAreValid_201or200() throws Exception {
+        int threads = 10;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Callable<Integer>> tasks = new ArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            tasks.add(() -> mockMvc.perform(post("/events")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(CONCURRENT_BODY))
+                    .andReturn().getResponse().getStatus());
+        }
+
+        List<Future<Integer>> futures = pool.invokeAll(tasks);
+        pool.shutdown();
+
+        for (Future<Integer> f : futures) {
+            int status = f.get();
+            assertThat(status)
+                    .as("concurrent response must be 200 or 201")
+                    .isIn(200, 201);
+        }
+    }
+
+    @Test
+    void concurrency_balanceUnaffectedByConcurrentDuplicates() throws Exception {
+        int threads = 10;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Callable<Void>> tasks = new ArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            tasks.add(() -> {
+                mockMvc.perform(post("/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(CONCURRENT_BODY));
+                return null;
+            });
+        }
+
+        pool.invokeAll(tasks);
+        pool.shutdown();
+
+        mockMvc.perform(get("/accounts/acct-concurrent/balance"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance").value(100.00))
+                .andExpect(jsonPath("$.eventCount").value(1));
+    }
+
+    @Test
+    void concurrency_simultaneousPostsDifferentEventIds_allSucceed() throws Exception {
+        int threads = 10;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Callable<Integer>> tasks = new ArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            final int idx = i;
+            tasks.add(() -> mockMvc.perform(post("/events")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(String.format(
+                                    """
+                                    {"eventId":"diff-evt-%d","accountId":"acct-diff",
+                                     "type":"CREDIT","amount":10.00,"currency":"USD",
+                                     "eventTimestamp":"2026-05-15T10:00:00Z"}""", idx)))
+                    .andReturn().getResponse().getStatus());
+        }
+
+        List<Future<Integer>> futures = pool.invokeAll(tasks);
+        pool.shutdown();
+
+        for (Future<Integer> f : futures) {
+            assertThat(f.get()).isEqualTo(201);
+        }
+
+        assertThat(eventRepository.count()).isEqualTo(threads);
     }
 
     // ─── Swagger / OpenAPI tests ──────────────────────────────────────────────
