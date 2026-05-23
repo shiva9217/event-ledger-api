@@ -21,6 +21,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 @RequiredArgsConstructor
@@ -28,6 +30,12 @@ public class EventService {
 
     private final EventRepository eventRepository;
     private final EventMapper eventMapper;
+
+    /**
+     * Per-eventId lock registry for application-level concurrency control.
+     * Prevents redundant DB round-trips when two threads race on the same eventId.
+     */
+    private final ConcurrentHashMap<String, ReentrantLock> lockRegistry = new ConcurrentHashMap<>();
 
     /**
      * Creates a new event or returns the existing one (idempotent).
