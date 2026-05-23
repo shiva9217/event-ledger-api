@@ -457,6 +457,26 @@ class EventLedgerIntegrationTest {
                 .andExpect(jsonPath("$.metadata.batchId").value("B-9042"));
     }
 
+    // ─── Swagger / OpenAPI tests ──────────────────────────────────────────────
+
+    @Test
+    void swaggerApiDocs_returns200AndValidJson() throws Exception {
+        mockMvc.perform(get("/api-docs"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.openapi").exists())
+                .andExpect(jsonPath("$.info.title").value("Event Ledger API"))
+                .andExpect(jsonPath("$.paths").exists());
+    }
+
+    @Test
+    void swaggerUiHtml_returns200() throws Exception {
+        mockMvc.perform(get("/swagger-ui.html"))
+                .andExpect(status().is3xxRedirection());
+        // SpringDoc serves swagger-ui.html as a redirect to /swagger-ui/index.html
+        mockMvc.perform(get("/swagger-ui/index.html"))
+                .andExpect(status().isOk());
+    }
+
     // ─── Pagination tests ─────────────────────────────────────────────────────
 
     private void postEvent(String id, String accountId, String type, double amount, String ts) throws Exception {
