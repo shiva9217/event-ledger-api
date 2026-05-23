@@ -17,10 +17,13 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 @RequiredArgsConstructor
@@ -28,30 +31,49 @@ public class EventService {
 
     private final EventRepository eventRepository;
     private final EventMapper eventMapper;
+    private final TransactionTemplate transactionTemplate;
+
+    /**
+     * Per-eventId lock registry for application-level concurrency control.
+     * Prevents redundant DB round-trips when two threads race on the same eventId.
+     */
+    private final ConcurrentHashMap<String, ReentrantLock> lockRegistry = new ConcurrentHashMap<>();
 
     /**
      * Creates a new event or returns the existing one (idempotent).
      *
-     * The DB primary key on eventId is the ultimate uniqueness guard.
-     * saveAndFlush flushes within the transaction so concurrent duplicates
-     * surface as DataIntegrityViolationException here, not as an unhandled 500.
+     * Two-layer concurrency protection:
+     *   Layer 1 — ReentrantLock per eventId serialises concurrent threads for the
+     *             same eventId at the application level.
+     *   Layer 2 — DB primary key + DataIntegrityViolationException catch is the
+     *             ultimate fallback for any race that slips past Layer 1.
+     *
+     * TransactionTemplate is used (not @Transactional) so that the DB commit
+     * happens INSIDE the lock boundary. With @Transactional the proxy commits
+     * AFTER the method returns — after the lock is already released — which would
+     * let a second thread read uncommitted data and fail with a 500.
      */
-    @Transactional
     public CreateEventResult createEvent(EventRequest request) {
-        return eventRepository.findById(request.getEventId())
-                .map(existing -> new CreateEventResult(eventMapper.toResponse(existing), false))
-                .orElseGet(() -> {
-                    try {
-                        Event saved = eventRepository.saveAndFlush(eventMapper.toEntity(request));
-                        return new CreateEventResult(eventMapper.toResponse(saved), true);
-                    } catch (DataIntegrityViolationException ex) {
-                        // Concurrent duplicate: another request won the INSERT race.
-                        // Fetch and return the persisted winner as an idempotent 200.
-                        Event existing = eventRepository.findById(request.getEventId())
-                                .orElseThrow(() -> ex);
-                        return new CreateEventResult(eventMapper.toResponse(existing), false);
-                    }
-                });
+        ReentrantLock lock = acquireLock(request.getEventId());
+        try {
+            return transactionTemplate.execute(status ->
+                eventRepository.findById(request.getEventId())
+                    .map(existing -> new CreateEventResult(eventMapper.toResponse(existing), false))
+                    .orElseGet(() -> {
+                        try {
+                            Event saved = eventRepository.saveAndFlush(eventMapper.toEntity(request));
+                            return new CreateEventResult(eventMapper.toResponse(saved), true);
+                        } catch (DataIntegrityViolationException ex) {
+                            // DB-level fallback: another thread won the INSERT race.
+                            Event existing = eventRepository.findById(request.getEventId())
+                                    .orElseThrow(() -> ex);
+                            return new CreateEventResult(eventMapper.toResponse(existing), false);
+                        }
+                    })
+            );
+        } finally {
+            releaseLock(request.getEventId(), lock);
+        }
     }
 
     @Transactional(readOnly = true)
@@ -96,6 +118,21 @@ public class EventService {
                 .last(result.isLast())
                 .build();
     }
+
+    // ── concurrency helpers ────────────────────────────────────────────────────
+
+    private ReentrantLock acquireLock(String eventId) {
+        ReentrantLock lock = lockRegistry.computeIfAbsent(eventId, k -> new ReentrantLock());
+        lock.lock();
+        return lock;
+    }
+
+    private void releaseLock(String eventId, ReentrantLock lock) {
+        lock.unlock();
+        lockRegistry.remove(eventId);
+    }
+
+    // ── pagination helpers ─────────────────────────────────────────────────────
 
     private void validatePageParams(int page, int size) {
         if (page < 0) {
