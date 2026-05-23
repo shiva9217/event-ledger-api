@@ -9,6 +9,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -70,7 +71,7 @@ class EventLedgerIntegrationTest {
                 .andExpect(jsonPath("$.type").value("DEBIT"));
     }
 
-    // ─── 3. POST duplicate eventId → 200 with original, no duplicate ─────────
+    // ─── 3. POST duplicate eventId → 200 with original, no duplicate stored ──
 
     @Test
     void postDuplicateEventId_returns200WithOriginal() throws Exception {
@@ -92,14 +93,16 @@ class EventLedgerIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.eventId").value("evt-dup"));
 
-        long count = eventRepository.count();
-        assert count == 1 : "Duplicate was persisted: " + count;
+        // assertThat (JUnit/AssertJ) is always active — unlike bare Java `assert`
+        assertThat(eventRepository.count())
+                .as("duplicate submission must not insert a second row")
+                .isEqualTo(1);
     }
 
-    // ─── 4. POST missing required field → 400 ────────────────────────────────
+    // ─── 4. POST missing required field (eventId) → 400 ─────────────────────
 
     @Test
-    void postMissingRequiredField_returns400() throws Exception {
+    void postMissingEventId_returns400() throws Exception {
         mockMvc.perform(post("/events")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -113,10 +116,30 @@ class EventLedgerIntegrationTest {
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
-                .andExpect(jsonPath("$.message").isNotEmpty());
+                .andExpect(jsonPath("$.message").value(containsString("eventId")));
     }
 
-    // ─── 5. POST amount = 0 → 400 ────────────────────────────────────────────
+    // ─── 5. POST missing accountId → 400 ────────────────────────────────────
+
+    @Test
+    void postMissingAccountId_returns400() throws Exception {
+        mockMvc.perform(post("/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "eventId": "evt-no-acct",
+                                  "type": "CREDIT",
+                                  "amount": 100.00,
+                                  "currency": "USD",
+                                  "eventTimestamp": "2026-05-15T10:00:00Z"
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(containsString("accountId")));
+    }
+
+    // ─── 6. POST amount = 0 → 400 ────────────────────────────────────────────
 
     @Test
     void postAmountZero_returns400() throws Exception {
@@ -133,10 +156,11 @@ class EventLedgerIntegrationTest {
                                 }
                                 """))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"));
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(containsString("amount")));
     }
 
-    // ─── 6. POST amount = -50 → 400 ──────────────────────────────────────────
+    // ─── 7. POST amount = -50 → 400 ──────────────────────────────────────────
 
     @Test
     void postNegativeAmount_returns400() throws Exception {
@@ -153,10 +177,11 @@ class EventLedgerIntegrationTest {
                                 }
                                 """))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"));
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(containsString("amount")));
     }
 
-    // ─── 7. POST invalid type → 400 ──────────────────────────────────────────
+    // ─── 8. POST invalid type (not CREDIT/DEBIT) → 400 ───────────────────────
 
     @Test
     void postInvalidType_returns400() throws Exception {
@@ -173,10 +198,51 @@ class EventLedgerIntegrationTest {
                                 }
                                 """))
                 .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(containsString("CREDIT")));
+    }
+
+    // ─── 9. POST missing type field → 400 ────────────────────────────────────
+
+    @Test
+    void postMissingType_returns400() throws Exception {
+        mockMvc.perform(post("/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "eventId": "evt-no-type",
+                                  "accountId": "acct-001",
+                                  "amount": 100.00,
+                                  "currency": "USD",
+                                  "eventTimestamp": "2026-05-15T10:00:00Z"
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(containsString("type")));
+    }
+
+    // ─── 10. POST invalid eventTimestamp format → 400 ────────────────────────
+
+    @Test
+    void postInvalidTimestampFormat_returns400() throws Exception {
+        mockMvc.perform(post("/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "eventId": "evt-bad-ts",
+                                  "accountId": "acct-001",
+                                  "type": "CREDIT",
+                                  "amount": 100.00,
+                                  "currency": "USD",
+                                  "eventTimestamp": "not-a-timestamp"
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"));
     }
 
-    // ─── 8. GET /events/{id} existing → 200 ──────────────────────────────────
+    // ─── 11. GET /events/{id} existing → 200 ─────────────────────────────────
 
     @Test
     void getExistingEvent_returns200() throws Exception {
@@ -200,7 +266,7 @@ class EventLedgerIntegrationTest {
                 .andExpect(jsonPath("$.amount").value(75.00));
     }
 
-    // ─── 9. GET /events/{id} missing → 404 ───────────────────────────────────
+    // ─── 12. GET /events/{id} missing → 404 ──────────────────────────────────
 
     @Test
     void getMissingEvent_returns404() throws Exception {
@@ -209,11 +275,11 @@ class EventLedgerIntegrationTest {
                 .andExpect(jsonPath("$.error").value("NOT_FOUND"));
     }
 
-    // ─── 10. GET /events?account= → ASC eventTimestamp (out-of-order arrival) ─
+    // ─── 13. GET /events?account= → ASC eventTimestamp (out-of-order arrival) ─
 
     @Test
     void getEventsByAccount_returnsChronologicalOrder() throws Exception {
-        // Post in reverse order — later timestamp first
+        // Post later timestamp first to prove ordering is by eventTimestamp, not arrival
         mockMvc.perform(post("/events")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -249,7 +315,7 @@ class EventLedgerIntegrationTest {
                 .andExpect(jsonPath("$[1].eventId").value("evt-late"));
     }
 
-    // ─── 11. GET /accounts/{accountId}/balance → correct net balance ──────────
+    // ─── 14. GET /accounts/{accountId}/balance → correct net balance ──────────
 
     @Test
     void getBalance_returnsCorrectNetBalance() throws Exception {
@@ -287,7 +353,44 @@ class EventLedgerIntegrationTest {
                 .andExpect(jsonPath("$.eventCount").value(2));
     }
 
-    // ─── 12. GET balance for account with no events → 0.00 ───────────────────
+    // ─── 15. GET balance → correct even when events arrive out of order ────────
+
+    @Test
+    void getBalance_correctWhenEventsArriveOutOfOrder() throws Exception {
+        // Send a later-occurring DEBIT first, earlier-occurring CREDIT second
+        mockMvc.perform(post("/events")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {
+                          "eventId": "ooo-d",
+                          "accountId": "acct-ooo",
+                          "type": "DEBIT",
+                          "amount": 200.00,
+                          "currency": "USD",
+                          "eventTimestamp": "2026-05-15T12:00:00Z"
+                        }
+                        """)).andExpect(status().isCreated());
+
+        mockMvc.perform(post("/events")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {
+                          "eventId": "ooo-c",
+                          "accountId": "acct-ooo",
+                          "type": "CREDIT",
+                          "amount": 700.00,
+                          "currency": "USD",
+                          "eventTimestamp": "2026-05-15T08:00:00Z"
+                        }
+                        """)).andExpect(status().isCreated());
+
+        mockMvc.perform(get("/accounts/acct-ooo/balance"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance").value(500.00))
+                .andExpect(jsonPath("$.eventCount").value(2));
+    }
+
+    // ─── 16. GET balance for account with no events → 0.00 ───────────────────
 
     @Test
     void getBalanceNoEvents_returnsZero() throws Exception {
@@ -298,7 +401,7 @@ class EventLedgerIntegrationTest {
                 .andExpect(jsonPath("$.eventCount").value(0));
     }
 
-    // ─── 13. Duplicate submission does NOT change balance ────────────────────
+    // ─── 17. Duplicate submission does NOT change balance ─────────────────────
 
     @Test
     void duplicateEvent_doesNotAffectBalance() throws Exception {
@@ -323,5 +426,9 @@ class EventLedgerIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.balance").value(300.00))
                 .andExpect(jsonPath("$.eventCount").value(1));
+
+        assertThat(eventRepository.count())
+                .as("only one row must exist after duplicate submission")
+                .isEqualTo(1);
     }
 }
