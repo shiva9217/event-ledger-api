@@ -310,9 +310,12 @@ class EventLedgerIntegrationTest {
 
         mockMvc.perform(get("/events").param("account", "acct-order"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(2)))
-                .andExpect(jsonPath("$[0].eventId").value("evt-early"))
-                .andExpect(jsonPath("$[1].eventId").value("evt-late"));
+                .andExpect(jsonPath("$.content", hasSize(2)))
+                .andExpect(jsonPath("$.content[0].eventId").value("evt-early"))
+                .andExpect(jsonPath("$.content[1].eventId").value("evt-late"))
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20));
     }
 
     // ─── 14. GET /accounts/{accountId}/balance → correct net balance ──────────
@@ -452,6 +455,102 @@ class EventLedgerIntegrationTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.metadata.source").value("mainframe-batch"))
                 .andExpect(jsonPath("$.metadata.batchId").value("B-9042"));
+    }
+
+    // ─── Pagination tests ─────────────────────────────────────────────────────
+
+    private void postEvent(String id, String accountId, String type, double amount, String ts) throws Exception {
+        mockMvc.perform(post("/events")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(String.format("""
+                        {"eventId":"%s","accountId":"%s","type":"%s","amount":%.2f,
+                         "currency":"USD","eventTimestamp":"%s"}""", id, accountId, type, amount, ts)))
+                .andExpect(status().isCreated());
+    }
+
+    @Test
+    void pagination_defaultPageAndSize() throws Exception {
+        postEvent("p-evt-1", "acct-page", "CREDIT", 100.0, "2026-05-01T10:00:00Z");
+        postEvent("p-evt-2", "acct-page", "DEBIT",  50.0, "2026-05-02T10:00:00Z");
+
+        mockMvc.perform(get("/events").param("account", "acct-page"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20))
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.first").value(true));
+    }
+
+    @Test
+    void pagination_customPageAndSize() throws Exception {
+        for (int i = 1; i <= 5; i++) {
+            postEvent("pg-evt-" + i, "acct-custom", "CREDIT", 10.0 * i,
+                    "2026-05-0" + i + "T10:00:00Z");
+        }
+
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-custom")
+                        .param("page", "1")
+                        .param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(1))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.content", hasSize(2)))
+                .andExpect(jsonPath("$.totalElements").value(5))
+                .andExpect(jsonPath("$.totalPages").value(3))
+                .andExpect(jsonPath("$.first").value(false));
+    }
+
+    @Test
+    void pagination_sizeGreaterThan100_returns400() throws Exception {
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-x")
+                        .param("size", "101"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(containsString("size")));
+    }
+
+    @Test
+    void pagination_negativePageNumber_returns400() throws Exception {
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-x")
+                        .param("page", "-1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(containsString("page")));
+    }
+
+    @Test
+    void pagination_correctTotalElementsAndTotalPages() throws Exception {
+        for (int i = 1; i <= 7; i++) {
+            postEvent("tot-evt-" + i, "acct-total", "CREDIT", 10.0,
+                    "2026-05-0" + i + "T10:00:00Z");
+        }
+
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-total")
+                        .param("size", "3"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements").value(7))
+                .andExpect(jsonPath("$.totalPages").value(3))
+                .andExpect(jsonPath("$.content", hasSize(3)));
+    }
+
+    @Test
+    void pagination_eventTimestampAscOrderWithinPage() throws Exception {
+        // Arrive out of order — third, first, second
+        postEvent("ord-evt-3", "acct-ord", "CREDIT", 30.0, "2026-05-03T10:00:00Z");
+        postEvent("ord-evt-1", "acct-ord", "CREDIT", 10.0, "2026-05-01T10:00:00Z");
+        postEvent("ord-evt-2", "acct-ord", "CREDIT", 20.0, "2026-05-02T10:00:00Z");
+
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-ord")
+                        .param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].eventId").value("ord-evt-1"))
+                .andExpect(jsonPath("$.content[1].eventId").value("ord-evt-2"))
+                .andExpect(jsonPath("$.content[2].eventId").value("ord-evt-3"));
     }
 
     // ─── 19. POST without metadata → accepted, metadata is null in response ───

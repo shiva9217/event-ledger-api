@@ -2,6 +2,7 @@ package com.eventledger.api.repository;
 
 import com.eventledger.api.domain.Event;
 import com.eventledger.api.domain.EventType;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -16,6 +17,8 @@ import java.util.Optional;
 public interface EventRepository extends JpaRepository<Event, String> {
 
     List<Event> findByAccountIdOrderByEventTimestampAsc(String accountId);
+
+    Page<Event> findByAccountIdOrderByEventTimestampAsc(String accountId, Pageable pageable);
 
     @Query("SELECT COALESCE(SUM(e.amount), 0) FROM Event e WHERE e.accountId = :accountId AND e.type = :type")
     BigDecimal sumAmountByAccountIdAndType(@Param("accountId") String accountId, @Param("type") EventType type);

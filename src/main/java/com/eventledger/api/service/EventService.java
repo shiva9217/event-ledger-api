@@ -6,11 +6,15 @@ import com.eventledger.api.dto.BalanceResponse;
 import com.eventledger.api.dto.CreateEventResult;
 import com.eventledger.api.dto.EventRequest;
 import com.eventledger.api.dto.EventResponse;
+import com.eventledger.api.dto.PagedResponse;
 import com.eventledger.api.exception.EventNotFoundException;
+import com.eventledger.api.exception.InvalidPageParamsException;
 import com.eventledger.api.repository.EventRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -63,6 +67,43 @@ public class EventService {
                 .stream()
                 .map(eventMapper::toResponse)
                 .toList();
+    }
+
+    /**
+     * Paginated variant of getEventsByAccount.
+     * Always sorted by eventTimestamp ASC — sort is not configurable.
+     * Validates: page >= 0, 1 <= size <= 100.
+     */
+    @Transactional(readOnly = true)
+    public PagedResponse<EventResponse> getEventsByAccountPaged(String accountId, int page, int size) {
+        validatePageParams(page, size);
+
+        PageRequest pageable = PageRequest.of(page, size, Sort.by("eventTimestamp").ascending());
+        Page<Event> result = eventRepository.findByAccountIdOrderByEventTimestampAsc(accountId, pageable);
+
+        List<EventResponse> content = result.getContent()
+                .stream()
+                .map(eventMapper::toResponse)
+                .toList();
+
+        return PagedResponse.<EventResponse>builder()
+                .content(content)
+                .page(result.getNumber())
+                .size(result.getSize())
+                .totalElements(result.getTotalElements())
+                .totalPages(result.getTotalPages())
+                .first(result.isFirst())
+                .last(result.isLast())
+                .build();
+    }
+
+    private void validatePageParams(int page, int size) {
+        if (page < 0) {
+            throw new InvalidPageParamsException("page must be >= 0");
+        }
+        if (size < 1 || size > 100) {
+            throw new InvalidPageParamsException("size must be between 1 and 100");
+        }
     }
 
     /**
