@@ -14,6 +14,13 @@ import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
 @SpringBootTest
 @AutoConfigureMockMvc
 class EventLedgerIntegrationTest {
@@ -310,9 +317,12 @@ class EventLedgerIntegrationTest {
 
         mockMvc.perform(get("/events").param("account", "acct-order"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(2)))
-                .andExpect(jsonPath("$[0].eventId").value("evt-early"))
-                .andExpect(jsonPath("$[1].eventId").value("evt-late"));
+                .andExpect(jsonPath("$.content", hasSize(2)))
+                .andExpect(jsonPath("$.content[0].eventId").value("evt-early"))
+                .andExpect(jsonPath("$.content[1].eventId").value("evt-late"))
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20));
     }
 
     // ─── 14. GET /accounts/{accountId}/balance → correct net balance ──────────
@@ -452,6 +462,226 @@ class EventLedgerIntegrationTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.metadata.source").value("mainframe-batch"))
                 .andExpect(jsonPath("$.metadata.batchId").value("B-9042"));
+    }
+
+    // ─── Concurrency tests ────────────────────────────────────────────────────
+
+    private static final String CONCURRENT_BODY = """
+            {"eventId":"concurrent-evt","accountId":"acct-concurrent",
+             "type":"CREDIT","amount":100.00,"currency":"USD",
+             "eventTimestamp":"2026-05-15T10:00:00Z"}""";
+
+    @Test
+    void concurrency_10SimultaneousPostsSameEventId_storesExactlyOne() throws Exception {
+        int threads = 10;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Callable<Integer>> tasks = new ArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            tasks.add(() -> mockMvc.perform(post("/events")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(CONCURRENT_BODY))
+                    .andReturn().getResponse().getStatus());
+        }
+
+        pool.invokeAll(tasks);
+        pool.shutdown();
+
+        assertThat(eventRepository.count())
+                .as("only one row must exist after 10 concurrent submissions of the same eventId")
+                .isEqualTo(1);
+    }
+
+    @Test
+    void concurrency_allResponsesAreValid_201or200() throws Exception {
+        int threads = 10;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Callable<Integer>> tasks = new ArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            tasks.add(() -> mockMvc.perform(post("/events")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(CONCURRENT_BODY))
+                    .andReturn().getResponse().getStatus());
+        }
+
+        List<Future<Integer>> futures = pool.invokeAll(tasks);
+        pool.shutdown();
+
+        for (Future<Integer> f : futures) {
+            int status = f.get();
+            assertThat(status)
+                    .as("concurrent response must be 200 or 201")
+                    .isIn(200, 201);
+        }
+    }
+
+    @Test
+    void concurrency_balanceUnaffectedByConcurrentDuplicates() throws Exception {
+        int threads = 10;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Callable<Void>> tasks = new ArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            tasks.add(() -> {
+                mockMvc.perform(post("/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(CONCURRENT_BODY));
+                return null;
+            });
+        }
+
+        pool.invokeAll(tasks);
+        pool.shutdown();
+
+        mockMvc.perform(get("/accounts/acct-concurrent/balance"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance").value(100.00))
+                .andExpect(jsonPath("$.eventCount").value(1));
+    }
+
+    @Test
+    void concurrency_simultaneousPostsDifferentEventIds_allSucceed() throws Exception {
+        int threads = 10;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Callable<Integer>> tasks = new ArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            final int idx = i;
+            tasks.add(() -> mockMvc.perform(post("/events")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(String.format(
+                                    """
+                                    {"eventId":"diff-evt-%d","accountId":"acct-diff",
+                                     "type":"CREDIT","amount":10.00,"currency":"USD",
+                                     "eventTimestamp":"2026-05-15T10:00:00Z"}""", idx)))
+                    .andReturn().getResponse().getStatus());
+        }
+
+        List<Future<Integer>> futures = pool.invokeAll(tasks);
+        pool.shutdown();
+
+        for (Future<Integer> f : futures) {
+            assertThat(f.get()).isEqualTo(201);
+        }
+
+        assertThat(eventRepository.count()).isEqualTo(threads);
+    }
+
+    // ─── Swagger / OpenAPI tests ──────────────────────────────────────────────
+
+    @Test
+    void swaggerApiDocs_returns200AndValidJson() throws Exception {
+        mockMvc.perform(get("/api-docs"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.openapi").exists())
+                .andExpect(jsonPath("$.info.title").value("Event Ledger API"))
+                .andExpect(jsonPath("$.paths").exists());
+    }
+
+    @Test
+    void swaggerUiHtml_returns200() throws Exception {
+        mockMvc.perform(get("/swagger-ui.html"))
+                .andExpect(status().is3xxRedirection());
+        // SpringDoc serves swagger-ui.html as a redirect to /swagger-ui/index.html
+        mockMvc.perform(get("/swagger-ui/index.html"))
+                .andExpect(status().isOk());
+    }
+
+    // ─── Pagination tests ─────────────────────────────────────────────────────
+
+    private void postEvent(String id, String accountId, String type, double amount, String ts) throws Exception {
+        mockMvc.perform(post("/events")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(String.format("""
+                        {"eventId":"%s","accountId":"%s","type":"%s","amount":%.2f,
+                         "currency":"USD","eventTimestamp":"%s"}""", id, accountId, type, amount, ts)))
+                .andExpect(status().isCreated());
+    }
+
+    @Test
+    void pagination_defaultPageAndSize() throws Exception {
+        postEvent("p-evt-1", "acct-page", "CREDIT", 100.0, "2026-05-01T10:00:00Z");
+        postEvent("p-evt-2", "acct-page", "DEBIT",  50.0, "2026-05-02T10:00:00Z");
+
+        mockMvc.perform(get("/events").param("account", "acct-page"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20))
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.first").value(true));
+    }
+
+    @Test
+    void pagination_customPageAndSize() throws Exception {
+        for (int i = 1; i <= 5; i++) {
+            postEvent("pg-evt-" + i, "acct-custom", "CREDIT", 10.0 * i,
+                    "2026-05-0" + i + "T10:00:00Z");
+        }
+
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-custom")
+                        .param("page", "1")
+                        .param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(1))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.content", hasSize(2)))
+                .andExpect(jsonPath("$.totalElements").value(5))
+                .andExpect(jsonPath("$.totalPages").value(3))
+                .andExpect(jsonPath("$.first").value(false));
+    }
+
+    @Test
+    void pagination_sizeGreaterThan100_returns400() throws Exception {
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-x")
+                        .param("size", "101"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(containsString("size")));
+    }
+
+    @Test
+    void pagination_negativePageNumber_returns400() throws Exception {
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-x")
+                        .param("page", "-1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(containsString("page")));
+    }
+
+    @Test
+    void pagination_correctTotalElementsAndTotalPages() throws Exception {
+        for (int i = 1; i <= 7; i++) {
+            postEvent("tot-evt-" + i, "acct-total", "CREDIT", 10.0,
+                    "2026-05-0" + i + "T10:00:00Z");
+        }
+
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-total")
+                        .param("size", "3"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements").value(7))
+                .andExpect(jsonPath("$.totalPages").value(3))
+                .andExpect(jsonPath("$.content", hasSize(3)));
+    }
+
+    @Test
+    void pagination_eventTimestampAscOrderWithinPage() throws Exception {
+        // Arrive out of order — third, first, second
+        postEvent("ord-evt-3", "acct-ord", "CREDIT", 30.0, "2026-05-03T10:00:00Z");
+        postEvent("ord-evt-1", "acct-ord", "CREDIT", 10.0, "2026-05-01T10:00:00Z");
+        postEvent("ord-evt-2", "acct-ord", "CREDIT", 20.0, "2026-05-02T10:00:00Z");
+
+        mockMvc.perform(get("/events")
+                        .param("account", "acct-ord")
+                        .param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].eventId").value("ord-evt-1"))
+                .andExpect(jsonPath("$.content[1].eventId").value("ord-evt-2"))
+                .andExpect(jsonPath("$.content[2].eventId").value("ord-evt-3"));
     }
 
     // ─── 19. POST without metadata → accepted, metadata is null in response ───
